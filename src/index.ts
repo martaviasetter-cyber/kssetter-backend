@@ -143,7 +143,7 @@ app.post('/webhook/instagram', async (req, res) => {
         let senderName = 'Instagram User'
         try {
           const r = await fetch(`https://graph.instagram.com/${senderId}?fields=name&access_token=${process.env.INSTAGRAM_TOKEN}`)
-          const data = await r.json()
+          const data = await r.json() as any
           senderName = data.name || senderName
         } catch {}
 
@@ -242,7 +242,7 @@ app.post('/webhook/facebook', async (req, res) => {
         let senderName = 'Facebook User'
         try {
           const r = await fetch(`https://graph.facebook.com/${senderId}?fields=name&access_token=${process.env.FACEBOOK_TOKEN}`)
-          const data = await r.json()
+          const data = await r.json() as any
           senderName = data.name || senderName
         } catch {}
 
