@@ -290,6 +290,181 @@ app.post('/connect/whatsapp', async (req, res) => {
   res.json({ ok: true })
 })
 
+// ================================================================
+// KP-SETTER — RUTAS OAUTH PARA CONECTAR REDES SOCIALES
+// ================================================================
+// Estas rutas van en el archivo src/index.ts del backend en Railway
+// Agrégalas ANTES de la línea: app.listen(PORT, () => {
+// ================================================================
+
+const META_APP_ID = process.env.META_APP_ID || '943441298220087'
+const META_APP_SECRET = process.env.META_APP_SECRET || ''
+const BACKEND_URL = process.env.RAILWAY_PUBLIC_DOMAIN
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+  : 'https://kssetter-backend-production.up.railway.app'
+
+// ── INSTAGRAM OAUTH ──
+// Paso 1: Redirige al usuario a Meta para autorizar
+app.get('/oauth/instagram/start', (req, res) => {
+  const userId = req.query.user_id as string
+  if (!userId) return res.status(400).json({ error: 'user_id required' })
+
+  const params = new URLSearchParams({
+    client_id: META_APP_ID,
+    redirect_uri: `${BACKEND_URL}/oauth/instagram/callback`,
+    scope: 'instagram_basic,instagram_manage_messages,pages_show_list',
+    response_type: 'code',
+    state: userId // guardamos el userId para usarlo en el callback
+  })
+
+  res.redirect(`https://www.facebook.com/v19.0/dialog/oauth?${params}`)
+})
+
+// Paso 2: Meta redirige aquí con el código de autorización
+app.get('/oauth/instagram/callback', async (req, res) => {
+  const code = req.query.code as string
+  const userId = req.query.state as string
+
+  if (!code || !userId) return res.redirect('https://kpsettetter.netlify.app/app.html?error=oauth_failed')
+
+  try {
+    // Intercambiar código por token de acceso
+    const tokenRes = await fetch('https://graph.facebook.com/v19.0/oauth/access_token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: META_APP_ID,
+        client_secret: META_APP_SECRET,
+        redirect_uri: `${BACKEND_URL}/oauth/instagram/callback`,
+        code
+      })
+    })
+    const tokenData = await tokenRes.json() as any
+    const accessToken = tokenData.access_token
+    if (!accessToken) throw new Error('No access token received')
+
+    // Obtener la cuenta de Instagram conectada
+    const igRes = await fetch(`https://graph.facebook.com/v19.0/me/accounts?access_token=${accessToken}`)
+    const igData = await igRes.json() as any
+
+    // Buscar página con Instagram conectado
+    let igAccountId = ''
+    for (const page of igData.data || []) {
+      const igPageRes = await fetch(`https://graph.facebook.com/v19.0/${page.id}?fields=instagram_business_account&access_token=${page.access_token}`)
+      const igPageData = await igPageRes.json() as any
+      if (igPageData.instagram_business_account?.id) {
+        igAccountId = igPageData.instagram_business_account.id
+        break
+      }
+    }
+
+    if (!igAccountId) throw new Error('No Instagram business account found')
+
+    // Guardar en Supabase
+    await sb.from('connected_accounts').upsert({
+      user_id: userId,
+      platform: 'instagram',
+      platform_account_id: igAccountId,
+      access_token: accessToken,
+    }, { onConflict: 'user_id,platform' })
+
+    res.redirect('https://kpsettetter.netlify.app/app.html?connected=instagram')
+  } catch (err: any) {
+    console.error('Instagram OAuth error:', err)
+    res.redirect('https://kpsettetter.netlify.app/app.html?error=instagram_failed')
+  }
+})
+
+// ── FACEBOOK MESSENGER OAUTH ──
+app.get('/oauth/facebook/start', (req, res) => {
+  const userId = req.query.user_id as string
+  if (!userId) return res.status(400).json({ error: 'user_id required' })
+
+  const params = new URLSearchParams({
+    client_id: META_APP_ID,
+    redirect_uri: `${BACKEND_URL}/oauth/facebook/callback`,
+    scope: 'pages_messaging,pages_show_list,pages_manage_metadata',
+    response_type: 'code',
+    state: userId
+  })
+
+  res.redirect(`https://www.facebook.com/v19.0/dialog/oauth?${params}`)
+})
+
+app.get('/oauth/facebook/callback', async (req, res) => {
+  const code = req.query.code as string
+  const userId = req.query.state as string
+
+  if (!code || !userId) return res.redirect('https://kpsettetter.netlify.app/app.html?error=oauth_failed')
+
+  try {
+    // Intercambiar código por token
+    const tokenRes = await fetch('https://graph.facebook.com/v19.0/oauth/access_token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: META_APP_ID,
+        client_secret: META_APP_SECRET,
+        redirect_uri: `${BACKEND_URL}/oauth/facebook/callback`,
+        code
+      })
+    })
+    const tokenData = await tokenRes.json() as any
+    const accessToken = tokenData.access_token
+    if (!accessToken) throw new Error('No access token received')
+
+    // Obtener páginas del usuario
+    const pagesRes = await fetch(`https://graph.facebook.com/v19.0/me/accounts?access_token=${accessToken}`)
+    const pagesData = await pagesRes.json() as any
+
+    if (!pagesData.data || pagesData.data.length === 0) throw new Error('No pages found')
+
+    // Usar la primera página (o la que el usuario seleccionó)
+    const page = pagesData.data[0]
+
+    // Guardar en Supabase
+    await sb.from('connected_accounts').upsert({
+      user_id: userId,
+      platform: 'facebook',
+      platform_account_id: page.id,
+      access_token: page.access_token, // token específico de la página
+    }, { onConflict: 'user_id,platform' })
+
+    // Suscribir la página al webhook
+    await fetch(`https://graph.facebook.com/v19.0/${page.id}/subscribed_apps`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subscribed_fields: ['messages', 'messaging_postbacks'],
+        access_token: page.access_token
+      })
+    })
+
+    res.redirect('https://kpsettetter.netlify.app/app.html?connected=facebook')
+  } catch (err: any) {
+    console.error('Facebook OAuth error:', err)
+    res.redirect('https://kpsettetter.netlify.app/app.html?error=facebook_failed')
+  }
+})
+
+// ── API: Verificar cuentas conectadas ──
+app.get('/connected-accounts/:userId', async (req, res) => {
+  const { userId } = req.params
+  const { data } = await sb.from('connected_accounts')
+    .select('platform, platform_account_id, created_at')
+    .eq('user_id', userId)
+  res.json({ accounts: data || [] })
+})
+
+// ── API: Desconectar cuenta ──
+app.delete('/connected-accounts/:userId/:platform', async (req, res) => {
+  const { userId, platform } = req.params
+  await sb.from('connected_accounts').delete()
+    .eq('user_id', userId)
+    .eq('platform', platform)
+  res.json({ ok: true })
+})
+
 app.listen(PORT, () => {
   console.log(`KS Setter Backend running on port ${PORT}`)
 })
